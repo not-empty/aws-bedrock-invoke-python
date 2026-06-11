@@ -1,0 +1,11 @@
+services:
+  app:
+    image: python:3.12-slim
+    working_dir: /workspace
+    command: tail -f /dev/null
+    tty: true
+    stdin_open: true
+    env_file:
+      - .env
+    volumes:
+      - ./:/workspace
