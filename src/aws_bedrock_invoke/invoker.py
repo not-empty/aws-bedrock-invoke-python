@@ -11,6 +11,7 @@ from botocore.config import Config
 from botocore.exceptions import ClientError
 
 from .config import BedrockClientConfig
+from .exceptions import BedrockMaxTokensError, BedrockRefusalError, BedrockResponseParseError
 from .parsing import extract_response_text, parse_response_json
 from .retry import RetryPolicy
 from .utils import resolve_model_id
@@ -25,6 +26,7 @@ class InvokeResult:
     parsed_json: dict[str, Any] | None
     usage: dict[str, Any]
     response_envelope: dict[str, Any]
+    stop_reason: str | None = None
 
 
 @dataclass(slots=True)
@@ -197,12 +199,14 @@ class BedrockInvoker:
         envelope = self._invoke_with_retry(model_id=model_id, body=body)
         text = extract_response_text(envelope)
         usage = envelope.get("usage") if isinstance(envelope.get("usage"), dict) else {}
+        stop_reason = envelope.get("stop_reason")
         return InvokeResult(
             model_id=model_id,
             response_text=text,
             parsed_json=None,
             usage=usage,
             response_envelope=envelope,
+            stop_reason=stop_reason if isinstance(stop_reason, str) else None,
         )
 
     def invoke_json(
@@ -229,10 +233,29 @@ class BedrockInvoker:
             thinking=thinking,
             output_config=output_config,
         )
+        try:
+            parsed_json = parse_response_json(result.response_text)
+        except BedrockResponseParseError as exc:
+            if result.stop_reason == "refusal":
+                raise BedrockRefusalError(
+                    "The model refused the request (stop_reason='refusal'); no JSON was returned.",
+                    result=result,
+                ) from exc
+            if result.stop_reason == "max_tokens":
+                raise BedrockMaxTokensError(
+                    "The response was cut off at max_tokens (stop_reason='max_tokens'); "
+                    "the JSON is incomplete. Increase max_tokens.",
+                    result=result,
+                ) from exc
+            message = str(exc)
+            if result.stop_reason is not None:
+                message = f"{message} (stop_reason={result.stop_reason!r})"
+            raise BedrockResponseParseError(message, result=result) from exc
         return InvokeResult(
             model_id=result.model_id,
             response_text=result.response_text,
-            parsed_json=parse_response_json(result.response_text),
+            parsed_json=parsed_json,
             usage=result.usage,
             response_envelope=result.response_envelope,
+            stop_reason=result.stop_reason,
         )

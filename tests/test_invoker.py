@@ -7,7 +7,12 @@ from unittest.mock import patch
 from botocore.exceptions import ClientError
 
 from aws_bedrock_invoke.config import BedrockClientConfig
-from aws_bedrock_invoke.invoker import BedrockInvoker
+from aws_bedrock_invoke.exceptions import (
+    BedrockMaxTokensError,
+    BedrockRefusalError,
+    BedrockResponseParseError,
+)
+from aws_bedrock_invoke.invoker import BedrockInvoker, InvokeResult
 from aws_bedrock_invoke.retry import RetryPolicy
 
 
@@ -284,3 +289,121 @@ class BedrockInvokerRequestBodyTests(unittest.TestCase):
         )
         self.assertEqual('{"ok":true}', result.response_text)
         self.assertEqual({"ok": True}, result.parsed_json)
+
+
+class BedrockInvokerStopReasonTests(unittest.TestCase):
+    def _invoke(self, method: str, envelope: dict):
+        invoker = BedrockInvoker(
+            client_config=BedrockClientConfig(region="us-east-1"),
+            client=_FlakyClient([envelope]),
+            retry_policy=RetryPolicy(jitter=False),
+        )
+        return getattr(invoker, method)(
+            model="arn:aws:bedrock:us-east-1:acct:inference-profile/test",
+            system_prompt="Reply with JSON.",
+            user_content=[{"type": "text", "text": "hello"}],
+        )
+
+    def test_stop_reason_is_exposed_on_result(self) -> None:
+        envelope = {
+            "content": [{"type": "text", "text": '{"ok":true}'}],
+            "stop_reason": "end_turn",
+            "usage": {},
+        }
+        for method in ("invoke_text", "invoke_json"):
+            with self.subTest(method=method):
+                self.assertEqual("end_turn", self._invoke(method, envelope).stop_reason)
+
+    def test_stop_reason_is_none_when_missing(self) -> None:
+        envelope = {"content": [{"type": "text", "text": '{"ok":true}'}], "usage": {}}
+        self.assertIsNone(self._invoke("invoke_json", envelope).stop_reason)
+
+    def test_invoke_result_can_still_be_built_without_stop_reason(self) -> None:
+        result = InvokeResult("model", "text", None, {}, {})
+        self.assertIsNone(result.stop_reason)
+
+    def test_invoke_text_does_not_raise_on_refusal_or_max_tokens(self) -> None:
+        for stop_reason in ("refusal", "max_tokens"):
+            with self.subTest(stop_reason=stop_reason):
+                envelope = {
+                    "content": [{"type": "text", "text": "partial"}],
+                    "stop_reason": stop_reason,
+                    "usage": {},
+                }
+                result = self._invoke("invoke_text", envelope)
+                self.assertEqual("partial", result.response_text)
+                self.assertEqual(stop_reason, result.stop_reason)
+
+    def test_invoke_json_raises_refusal_error_when_json_is_invalid(self) -> None:
+        envelope = {"content": [], "stop_reason": "refusal", "usage": {}}
+        with self.assertRaises(BedrockRefusalError) as ctx:
+            self._invoke("invoke_json", envelope)
+        self.assertIsInstance(ctx.exception, BedrockResponseParseError)
+        self.assertEqual("refusal", ctx.exception.result.stop_reason)
+        self.assertEqual(envelope, ctx.exception.result.response_envelope)
+
+    def test_invoke_json_raises_max_tokens_error_when_json_is_truncated(self) -> None:
+        envelope = {
+            "content": [{"type": "text", "text": '{"answer": "cut'}],
+            "stop_reason": "max_tokens",
+            "usage": {},
+        }
+        with self.assertRaises(BedrockMaxTokensError) as ctx:
+            self._invoke("invoke_json", envelope)
+        self.assertIsInstance(ctx.exception, BedrockResponseParseError)
+        self.assertEqual('{"answer": "cut', ctx.exception.result.response_text)
+
+    def test_invoke_json_generic_parse_error_reports_other_stop_reason(self) -> None:
+        envelope = {
+            "content": [{"type": "text", "text": "not json"}],
+            "stop_reason": "end_turn",
+            "usage": {},
+        }
+        with self.assertRaises(BedrockResponseParseError) as ctx:
+            self._invoke("invoke_json", envelope)
+        self.assertIs(BedrockResponseParseError, type(ctx.exception))
+        self.assertIn("stop_reason='end_turn'", str(ctx.exception))
+        self.assertEqual("end_turn", ctx.exception.result.stop_reason)
+
+    def test_invoke_json_returns_valid_json_even_with_max_tokens(self) -> None:
+        envelope = {
+            "content": [{"type": "text", "text": '{"ok":true}'}],
+            "stop_reason": "max_tokens",
+            "usage": {},
+        }
+        result = self._invoke("invoke_json", envelope)
+        self.assertEqual({"ok": True}, result.parsed_json)
+        self.assertEqual("max_tokens", result.stop_reason)
+
+    def test_invoke_json_parse_error_message_unchanged_without_stop_reason(self) -> None:
+        envelope = {"content": [{"type": "text", "text": "not json"}], "usage": {}}
+        with self.assertRaises(BedrockResponseParseError) as ctx:
+            self._invoke("invoke_json", envelope)
+        self.assertTrue(str(ctx.exception).startswith("Failed to parse JSON response:"))
+        self.assertNotIn("stop_reason", str(ctx.exception))
+        self.assertIsNone(ctx.exception.result.stop_reason)
+
+    def test_parse_error_can_still_be_raised_with_message_only(self) -> None:
+        error = BedrockResponseParseError("boom")
+        self.assertEqual("boom", str(error))
+        self.assertIsNone(error.result)
+
+    def test_parse_error_accepts_same_arguments_as_1_0_0(self) -> None:
+        for args in ((), ("message",), ("a", "b")):
+            with self.subTest(args=args):
+                error = BedrockResponseParseError(*args)
+                self.assertEqual(args, error.args)
+                self.assertIsNone(error.result)
+
+    def test_exceptions_are_exported_from_package(self) -> None:
+        import aws_bedrock_invoke
+
+        for name in (
+            "BedrockInvokeError",
+            "BedrockResponseParseError",
+            "BedrockRefusalError",
+            "BedrockMaxTokensError",
+        ):
+            with self.subTest(name=name):
+                self.assertIn(name, aws_bedrock_invoke.__all__)
+                self.assertTrue(hasattr(aws_bedrock_invoke, name))

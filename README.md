@@ -129,6 +129,50 @@ When using Claude Sonnet 5.5:
   `"additionalProperties": False`.
 - `invoke_json()` requires a JSON object at the root of the response.
 
+## Stop Reason, Refusals and Truncation
+
+A refusal or a response cut off at `max_tokens` still comes back as a
+successful (HTTP 200) call. Every `InvokeResult` exposes the model's
+`stop_reason` (`"end_turn"`, `"max_tokens"`, `"refusal"`, ...), or `None` when
+the response has none.
+
+`invoke_text()` never raises because of the stop reason. Check it yourself:
+
+```python
+result = invoker.invoke_text(...)
+
+if result.stop_reason == "refusal":
+    ...
+elif result.stop_reason == "max_tokens":
+    ...  # result.response_text is incomplete
+```
+
+`invoke_json()` raises a more specific error only when the JSON cannot be
+parsed:
+
+- `BedrockRefusalError` when `stop_reason` is `"refusal"`
+- `BedrockMaxTokensError` when `stop_reason` is `"max_tokens"`
+- `BedrockResponseParseError` for any other parse failure; its message includes
+  the `stop_reason` when the response has one
+
+Both new errors subclass `BedrockResponseParseError`, so existing
+`except BedrockResponseParseError` blocks still catch them. All three carry the
+`InvokeResult` in `error.result`.
+
+```python
+from aws_bedrock_invoke import BedrockMaxTokensError, BedrockRefusalError
+
+try:
+    result = invoker.invoke_json(...)
+except BedrockRefusalError as error:
+    print("refused:", error.result.response_envelope)
+except BedrockMaxTokensError:
+    ...  # retry with a higher max_tokens
+```
+
+If the JSON parses, no error is raised, even when `stop_reason` is
+`"max_tokens"`.
+
 ## Client Injection
 
 Client injection is optional.
@@ -227,6 +271,13 @@ Default retry behavior:
 - `json_text_block`
 - `text_block`
 - `resolve_model_id`
+
+Exceptions:
+
+- `BedrockInvokeError`
+- `BedrockResponseParseError`
+- `BedrockRefusalError`
+- `BedrockMaxTokensError`
 
 ## Model Resolution
 
