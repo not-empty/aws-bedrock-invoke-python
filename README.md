@@ -1,6 +1,6 @@
 # AWS Bedrock Invoke Python
 
-AWS Bedrock Invoke Python is a small library for invoking Claude 4.x models on
+AWS Bedrock Invoke Python is a small library for invoking Claude 4.x and 5.x models on
 AWS Bedrock with one consistent request path.
 
 It focuses only on the transport layer:
@@ -26,7 +26,7 @@ pip install aws-bedrock-invoke
 
 This library is intentionally narrow:
 
-- Claude 4.x on AWS Bedrock only
+- Claude 4.x and 5.x on AWS Bedrock only
 - manual retry managed by the library
 - Bedrock prompt-cache support
 - text and JSON invoke helpers
@@ -78,6 +78,56 @@ result = invoker.invoke_text(
 
 print(result.response_text)
 ```
+
+### Claude Sonnet 5.5
+
+```python
+from aws_bedrock_invoke import BedrockInvoker, json_text_block
+
+invoker = BedrockInvoker.from_env()
+
+result = invoker.invoke_json(
+    model="us.anthropic.claude-sonnet-5-5",
+    profile_arn_fmt="arn:aws:bedrock:{region}:123456789012:inference-profile/{model}",
+    system_prompt="Answer the question.",
+    user_content=[
+        json_text_block({"question": "hello"}),
+    ],
+    max_tokens=16000,
+    temperature=None,
+    thinking={"type": "adaptive"},
+    output_config={
+        "effort": "medium",
+        "format": {
+            "type": "json_schema",
+            "schema": {
+                "type": "object",
+                "properties": {"answer": {"type": "string"}},
+                "required": ["answer"],
+                "additionalProperties": False,
+            },
+        },
+    },
+)
+
+print(result.parsed_json)
+```
+
+`thinking` and `output_config` are optional, sent to Bedrock exactly as given, and
+left out of the request when `None`. Both also work with `invoke_text()`.
+
+When using Claude Sonnet 5.5:
+
+- Pass `temperature=None`. The library default is `0.0`, and this model rejects
+  non-default values with a 400 error.
+- `thinking` accepts `{"type": "adaptive"}` (the model default) or
+  `{"type": "between_tools"}`, which turns thinking off and requires effort `high`
+  or below. `disabled` and `budget_tokens` return a 400 error.
+- Thinking counts toward `max_tokens`, so the default of `4000` may truncate the
+  response.
+- With `output_config.format`, every `object` in the schema must set
+  `"additionalProperties": False`.
+- `invoke_json()` requires a JSON object at the root of the response.
 
 ## Client Injection
 

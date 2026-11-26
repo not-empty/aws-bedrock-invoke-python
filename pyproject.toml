@@ -1,10 +1,10 @@
 [project]
 name = "aws-bedrock-invoke"
-version = "1.0.0"
+version = "1.1.0"
 authors = [
   { name="Not Empty Foundation", email="dev@not-empty.org" },
 ]
-description = "Small Python library for invoking Claude 4.x models on AWS Bedrock with manual retries, prompt caching helpers, and JSON parsing."
+description = "Small Python library for invoking Claude 4.x and 5.x models on AWS Bedrock with manual retries, prompt caching helpers, and JSON parsing."
 readme = "README.md"
 requires-python = ">=3.10"
 classifiers = [

@@ -194,3 +194,93 @@ class BedrockInvokerTests(unittest.TestCase):
 
         self.assertEqual("plain text response", result.response_text)
         self.assertIsNone(result.parsed_json)
+
+
+class BedrockInvokerRequestBodyTests(unittest.TestCase):
+    METHODS = ("invoke_text", "invoke_json")
+
+    def _sent_body(self, method: str, **kwargs) -> dict:
+        fake_client = _FlakyClient(
+            [{"content": [{"type": "text", "text": '{"ok":true}'}], "usage": {}}]
+        )
+        invoker = BedrockInvoker(
+            client_config=BedrockClientConfig(region="us-east-1"),
+            client=fake_client,
+            retry_policy=RetryPolicy(jitter=False),
+        )
+        getattr(invoker, method)(
+            model="arn:aws:bedrock:us-east-1:acct:inference-profile/test",
+            system_prompt="Reply with JSON.",
+            user_content=[{"type": "text", "text": "hello"}],
+            **kwargs,
+        )
+        return json.loads(fake_client.calls[0]["body"])
+
+    def test_default_body_is_unchanged_from_1_0_0(self) -> None:
+        expected = {
+            "anthropic_version": "bedrock-2023-05-31",
+            "max_tokens": 4000,
+            "temperature": 0.0,
+            "system": "Reply with JSON.",
+            "messages": [
+                {"role": "user", "content": [{"type": "text", "text": "hello"}]},
+            ],
+        }
+        for method in self.METHODS:
+            with self.subTest(method=method):
+                self.assertEqual(expected, self._sent_body(method))
+
+    def test_explicit_temperature_is_sent(self) -> None:
+        for method in self.METHODS:
+            with self.subTest(method=method):
+                self.assertEqual(0.5, self._sent_body(method, temperature=0.5)["temperature"])
+
+    def test_temperature_none_is_omitted(self) -> None:
+        for method in self.METHODS:
+            with self.subTest(method=method):
+                self.assertNotIn("temperature", self._sent_body(method, temperature=None))
+
+    def test_thinking_and_output_config_are_sent_as_given(self) -> None:
+        thinking = {"type": "adaptive"}
+        output_config = {
+            "effort": "medium",
+            "format": {
+                "type": "json_schema",
+                "schema": {
+                    "type": "object",
+                    "properties": {"ok": {"type": "boolean"}},
+                    "required": ["ok"],
+                    "additionalProperties": False,
+                },
+            },
+        }
+        for method in self.METHODS:
+            with self.subTest(method=method):
+                body = self._sent_body(method, thinking=thinking, output_config=output_config)
+                self.assertEqual(thinking, body["thinking"])
+                self.assertEqual(output_config, body["output_config"])
+
+    def test_thinking_blocks_are_not_part_of_response_text(self) -> None:
+        fake_client = _FlakyClient(
+            [
+                {
+                    "content": [
+                        {"type": "thinking", "thinking": "{not json}", "signature": "sig"},
+                        {"type": "text", "text": '{"ok":true}'},
+                    ],
+                    "usage": {},
+                }
+            ]
+        )
+        invoker = BedrockInvoker(
+            client_config=BedrockClientConfig(region="us-east-1"),
+            client=fake_client,
+            retry_policy=RetryPolicy(jitter=False),
+        )
+        result = invoker.invoke_json(
+            model="arn:aws:bedrock:us-east-1:acct:inference-profile/test",
+            system_prompt="Reply with JSON.",
+            user_content=[{"type": "text", "text": "hello"}],
+        )
+        self.assertEqual('{"ok":true}', result.response_text)
+        self.assertEqual({"ok": True}, result.parsed_json)

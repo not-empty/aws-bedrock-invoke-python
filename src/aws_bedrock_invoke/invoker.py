@@ -90,13 +90,14 @@ class BedrockInvoker:
         system_prompt: str | Sequence[dict[str, Any]],
         user_content: Sequence[dict[str, Any]],
         max_tokens: int,
-        temperature: float,
+        temperature: float | None,
         anthropic_version: str,
+        thinking: dict[str, Any] | None = None,
+        output_config: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        return {
+        body: dict[str, Any] = {
             "anthropic_version": anthropic_version,
             "max_tokens": max_tokens,
-            "temperature": temperature,
             "system": system_prompt,
             "messages": [
                 {
@@ -105,6 +106,17 @@ class BedrockInvoker:
                 }
             ],
         }
+
+        if temperature is not None:
+            body["temperature"] = temperature
+
+        if thinking is not None:
+            body["thinking"] = thinking
+
+        if output_config is not None:
+            body["output_config"] = output_config
+
+        return body
 
     def _get_error_code(self, error: ClientError) -> str:
         return str((error.response.get("Error") or {}).get("Code", "") or "")
@@ -163,8 +175,10 @@ class BedrockInvoker:
         user_content: Sequence[dict[str, Any]],
         profile_arn_fmt: str | None = None,
         max_tokens: int = 4000,
-        temperature: float = 0.0,
+        temperature: float | None = 0.0,
         anthropic_version: str = DEFAULT_ANTHROPIC_VERSION,
+        thinking: dict[str, Any] | None = None,
+        output_config: dict[str, Any] | None = None,
     ) -> InvokeResult:
         model_id = resolve_model_id(
             model,
@@ -177,6 +191,8 @@ class BedrockInvoker:
             max_tokens=max_tokens,
             temperature=temperature,
             anthropic_version=anthropic_version,
+            thinking=thinking,
+            output_config=output_config,
         )
         envelope = self._invoke_with_retry(model_id=model_id, body=body)
         text = extract_response_text(envelope)
@@ -197,8 +213,10 @@ class BedrockInvoker:
         user_content: Sequence[dict[str, Any]],
         profile_arn_fmt: str | None = None,
         max_tokens: int = 4000,
-        temperature: float = 0.0,
+        temperature: float | None = 0.0,
         anthropic_version: str = DEFAULT_ANTHROPIC_VERSION,
+        thinking: dict[str, Any] | None = None,
+        output_config: dict[str, Any] | None = None,
     ) -> InvokeResult:
         result = self.invoke_text(
             model=model,
@@ -208,6 +226,8 @@ class BedrockInvoker:
             max_tokens=max_tokens,
             temperature=temperature,
             anthropic_version=anthropic_version,
+            thinking=thinking,
+            output_config=output_config,
         )
         return InvokeResult(
             model_id=result.model_id,
