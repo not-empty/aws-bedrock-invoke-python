@@ -79,7 +79,49 @@ result = invoker.invoke_text(
 print(result.response_text)
 ```
 
+## Parameters by Model Version
+
+Claude 4.x and Claude 5.x models accept different request parameters. Use this
+table to pick the right ones:
+
+| Parameter | Claude 4.x (e.g. Sonnet 4.5) | Claude Sonnet 5.5 |
+|---|---|---|
+| `temperature` | Keep the default (`0.0`) or pass a value | Pass `None` (required) |
+| `thinking` | Do not pass it | Optional: `{"type": "adaptive"}` or `{"type": "between_tools"}` |
+| `output_config` | Do not pass it | Optional: `effort` and/or `format` |
+| `max_tokens` | Default `4000` is fine | Raise it (e.g. `16000`): thinking counts toward it |
+
+`thinking` and `output_config` are sent to Bedrock exactly as given and left out
+of the request when `None`, so Claude 4.x calls stay identical to version 1.0.0.
+
+These rules were verified with Claude Sonnet 4.5 and Claude Sonnet 5.5. Other
+models may differ, so check the model's documentation before using them.
+
+### Claude 4.x
+
+Call the library as in version 1.0.0. Leave `thinking` and `output_config` unset:
+
+```python
+from aws_bedrock_invoke import BedrockInvoker, json_text_block
+
+invoker = BedrockInvoker.from_env()
+
+result = invoker.invoke_json(
+    model="us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+    profile_arn_fmt="arn:aws:bedrock:{region}:123456789012:inference-profile/{model}",
+    system_prompt="Reply with strict JSON.",
+    user_content=[
+        json_text_block({"question": "hello"}),
+    ],
+)
+
+print(result.parsed_json)
+```
+
 ### Claude Sonnet 5.5
+
+Pass `temperature=None`, raise `max_tokens`, and optionally set `thinking` and
+`output_config`:
 
 ```python
 from aws_bedrock_invoke import BedrockInvoker, json_text_block
@@ -113,18 +155,17 @@ result = invoker.invoke_json(
 print(result.parsed_json)
 ```
 
-`thinking` and `output_config` are optional, sent to Bedrock exactly as given, and
-left out of the request when `None`. Both also work with `invoke_text()`.
+Both parameters also work with `invoke_text()`.
 
-When using Claude Sonnet 5.5:
+Notes for Claude Sonnet 5.5:
 
-- Pass `temperature=None`. The library default is `0.0`, and this model rejects
-  non-default values with a 400 error.
+- Without `temperature=None`, the request fails with a 400 error
+  (`temperature` is deprecated for this model).
 - `thinking` accepts `{"type": "adaptive"}` (the model default) or
   `{"type": "between_tools"}`, which turns thinking off and requires effort `high`
   or below. `disabled` and `budget_tokens` return a 400 error.
-- Thinking counts toward `max_tokens`, so the default of `4000` may truncate the
-  response.
+- `output_config.effort` defaults to `high`. Lower values answer faster and use
+  fewer tokens.
 - With `output_config.format`, every `object` in the schema must set
   `"additionalProperties": False`.
 - `invoke_json()` requires a JSON object at the root of the response.
@@ -296,7 +337,8 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 
 ## Examples
 
-Runnable examples live in [examples](/home/disarli/Projects/aws-bedrock-invoke-python/examples):
+Runnable examples live in [examples](examples). They make real, billed calls to
+AWS Bedrock, so they never run as part of the test suite:
 
 ```bash
 PYTHONPATH=src python3 examples/invoke_json_example.py
@@ -305,7 +347,8 @@ PYTHONPATH=src python3 examples/invoke_text_example.py
 
 ## Consumer Integration
 
-This repo includes library-level tests and Bedrock smoke examples.
+This repo includes library-level unit tests, which never call AWS, and runnable
+examples that do.
 
 Consumer repositories should still add their own integration smoke that uses
 their real prompt builders and payload-shaping logic through this library.

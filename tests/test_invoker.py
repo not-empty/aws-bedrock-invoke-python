@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import unittest
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 from botocore.exceptions import ClientError
 
@@ -12,7 +13,7 @@ from aws_bedrock_invoke.exceptions import (
     BedrockRefusalError,
     BedrockResponseParseError,
 )
-from aws_bedrock_invoke.invoker import BedrockInvoker, InvokeResult
+from aws_bedrock_invoke.invoker import BedrockInvoker, InvokeResult, RetryEvent
 from aws_bedrock_invoke.retry import RetryPolicy
 
 
@@ -407,3 +408,151 @@ class BedrockInvokerStopReasonTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertIn(name, aws_bedrock_invoke.__all__)
                 self.assertTrue(hasattr(aws_bedrock_invoke, name))
+
+
+class BedrockInvokerRetryAcrossModelsTests(unittest.TestCase):
+    """The retry loop must behave the same for Claude 4.x and Claude 5.x requests."""
+
+    MODEL_PARAMS = {
+        "claude-4x": {},
+        "claude-5x": {
+            "max_tokens": 16000,
+            "temperature": None,
+            "thinking": {"type": "adaptive"},
+            "output_config": {"effort": "medium"},
+        },
+    }
+    METHODS = ("invoke_text", "invoke_json")
+    OK_ENVELOPE = {
+        "content": [{"type": "text", "text": '{"ok":true}'}],
+        "stop_reason": "end_turn",
+        "usage": {},
+    }
+
+    def _run(self, responses, method, params, policy=None):
+        fake_client = _FlakyClient(responses)
+        events: list[RetryEvent] = []
+        invoker = BedrockInvoker(
+            client_config=BedrockClientConfig(region="us-east-1"),
+            client=fake_client,
+            retry_policy=policy
+            or RetryPolicy(max_attempts=3, base_delay_seconds=5.0, max_delay_seconds=45.0, jitter=False),
+            on_retry=events.append,
+        )
+        with patch("aws_bedrock_invoke.invoker.time.sleep") as sleep_mock:
+            try:
+                result = getattr(invoker, method)(
+                    model="arn:aws:bedrock:us-east-1:acct:inference-profile/test",
+                    system_prompt="Reply with JSON.",
+                    user_content=[{"type": "text", "text": "hello"}],
+                    **params,
+                )
+                error = None
+            except ClientError as exc:
+                result, error = None, exc
+        return fake_client, events, sleep_mock, result, error
+
+    def _cases(self):
+        for name, params in self.MODEL_PARAMS.items():
+            for method in self.METHODS:
+                yield name, params, method
+
+    def test_retryable_error_is_retried_until_success(self) -> None:
+        for name, params, method in self._cases():
+            with self.subTest(model=name, method=method):
+                client, events, sleep_mock, result, error = self._run(
+                    [
+                        _client_error("ServiceUnavailableException"),
+                        _client_error("InternalServerException"),
+                        _client_error("ServiceUnavailableException"),
+                        self.OK_ENVELOPE,
+                    ],
+                    method,
+                    params,
+                    policy=RetryPolicy(
+                        max_attempts=4, base_delay_seconds=5.0, max_delay_seconds=45.0, jitter=False
+                    ),
+                )
+                self.assertIsNone(error)
+                self.assertEqual('{"ok":true}', result.response_text)
+                self.assertEqual(4, len(client.calls))
+                self.assertEqual([1, 2, 3], [event.attempt for event in events])
+                self.assertEqual(
+                    [
+                        "ServiceUnavailableException",
+                        "InternalServerException",
+                        "ServiceUnavailableException",
+                    ],
+                    [event.error_code for event in events],
+                )
+                self.assertEqual([call(5.0), call(10.0), call(20.0)], sleep_mock.call_args_list)
+                bodies = [c["body"] for c in client.calls]
+                self.assertEqual(1, len(set(bodies)), "every attempt must send the same body")
+
+    def test_non_retryable_error_is_raised_immediately(self) -> None:
+        for name, params, method in self._cases():
+            with self.subTest(model=name, method=method):
+                client, events, sleep_mock, _, error = self._run(
+                    [_client_error("ValidationException")],
+                    method,
+                    params,
+                )
+                self.assertEqual("ValidationException", error.response["Error"]["Code"])
+                self.assertEqual(1, len(client.calls))
+                self.assertEqual([], events)
+                sleep_mock.assert_not_called()
+
+    def test_last_error_is_raised_when_attempts_are_exhausted(self) -> None:
+        for name, params, method in self._cases():
+            with self.subTest(model=name, method=method):
+                client, events, sleep_mock, _, error = self._run(
+                    [_client_error("ServiceUnavailableException")] * 3,
+                    method,
+                    params,
+                )
+                self.assertEqual("ServiceUnavailableException", error.response["Error"]["Code"])
+                self.assertEqual(3, len(client.calls))
+                self.assertEqual(2, len(events))
+                self.assertEqual(2, sleep_mock.call_count)
+
+    def test_error_codes_added_through_env_are_retried(self) -> None:
+        with patch.dict(os.environ, {"BEDROCK_RETRYABLE_ERROR_CODES": "ThrottlingException"}, clear=True):
+            policy = RetryPolicy.from_env()
+        for name, params, method in self._cases():
+            with self.subTest(model=name, method=method):
+                client, events, _, result, error = self._run(
+                    [
+                        _client_error("ThrottlingException"),
+                        _client_error("ServiceUnavailableException"),
+                        self.OK_ENVELOPE,
+                    ],
+                    method,
+                    params,
+                    policy=policy,
+                )
+                self.assertIsNone(error)
+                self.assertEqual(3, len(client.calls))
+                self.assertEqual(
+                    ["ThrottlingException", "ServiceUnavailableException"],
+                    [event.error_code for event in events],
+                )
+
+    def test_parse_errors_are_not_retried(self) -> None:
+        for name, params in self.MODEL_PARAMS.items():
+            with self.subTest(model=name):
+                client = _FlakyClient(
+                    [{"content": [], "stop_reason": "refusal", "usage": {}}, self.OK_ENVELOPE]
+                )
+                invoker = BedrockInvoker(
+                    client_config=BedrockClientConfig(region="us-east-1"),
+                    client=client,
+                    retry_policy=RetryPolicy(jitter=False),
+                )
+                with self.assertRaises(BedrockResponseParseError):
+                    invoker.invoke_json(
+                        model="arn:aws:bedrock:us-east-1:acct:inference-profile/test",
+                        system_prompt="Reply with JSON.",
+                        user_content=[{"type": "text", "text": "hello"}],
+                        **params,
+                    )
+                self.assertEqual(1, len(client.calls))

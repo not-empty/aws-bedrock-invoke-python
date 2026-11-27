@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.1.0
+## 2.0.0
 
 - Added optional `thinking` and `output_config` parameters to `invoke_text()` and
   `invoke_json()`
