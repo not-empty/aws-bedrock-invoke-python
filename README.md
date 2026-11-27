@@ -87,7 +87,7 @@ table to pick the right ones:
 | Parameter | Claude 4.x (e.g. Sonnet 4.5) | Claude Sonnet 5.5 |
 |---|---|---|
 | `temperature` | Keep the default (`0.0`) or pass a value | Pass `None` (required) |
-| `thinking` | Do not pass it | Optional: `{"type": "adaptive"}` or `{"type": "between_tools"}` |
+| `thinking` | Leave unset to preserve the v1 request; consult the model documentation before providing it | Optional: `{"type": "adaptive"}` or `{"type": "between_tools"}` |
 | `output_config` | Do not pass it | Optional: `effort` and/or `format` |
 | `max_tokens` | Default `4000` is fine | Raise it (e.g. `16000`): thinking counts toward it |
 
@@ -160,7 +160,7 @@ Both parameters also work with `invoke_text()`.
 Notes for Claude Sonnet 5.5:
 
 - Without `temperature=None`, the request fails with a 400 error
-  (`temperature` is deprecated for this model).
+  (`temperature` is unsupported for this model).
 - `thinking` accepts `{"type": "adaptive"}` (the model default) or
   `{"type": "between_tools"}`, which turns thinking off and requires effort `high`
   or below. `disabled` and `budget_tokens` return a 400 error.
