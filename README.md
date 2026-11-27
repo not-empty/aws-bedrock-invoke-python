@@ -1,6 +1,6 @@
 # AWS Bedrock Invoke Python
 
-AWS Bedrock Invoke Python is a small library for invoking Claude 4.x models on
+AWS Bedrock Invoke Python is a small library for invoking Claude 4.x and 5.x models on
 AWS Bedrock with one consistent request path.
 
 It focuses only on the transport layer:
@@ -26,7 +26,7 @@ pip install aws-bedrock-invoke
 
 This library is intentionally narrow:
 
-- Claude 4.x on AWS Bedrock only
+- Claude 4.x and 5.x on AWS Bedrock only
 - manual retry managed by the library
 - Bedrock prompt-cache support
 - text and JSON invoke helpers
@@ -78,6 +78,141 @@ result = invoker.invoke_text(
 
 print(result.response_text)
 ```
+
+## Parameters by Model Version
+
+Claude 4.x and Claude 5.x models accept different request parameters. Use this
+table to pick the right ones:
+
+| Parameter | Claude 4.x (e.g. Sonnet 4.5) | Claude Sonnet 5.5 |
+|---|---|---|
+| `temperature` | Keep the default (`0.0`) or pass a value | Pass `None` (required) |
+| `thinking` | Leave unset to preserve the v1 request; consult the model documentation before providing it | Optional: `{"type": "adaptive"}` or `{"type": "between_tools"}` |
+| `output_config` | Do not pass it | Optional: `effort` and/or `format` |
+| `max_tokens` | Default `4000` is fine | Raise it (e.g. `16000`): thinking counts toward it |
+
+`thinking` and `output_config` are sent to Bedrock exactly as given and left out
+of the request when `None`, so Claude 4.x calls stay identical to version 1.0.0.
+
+These rules were verified with Claude Sonnet 4.5 and Claude Sonnet 5.5. Other
+models may differ, so check the model's documentation before using them.
+
+### Claude 4.x
+
+Call the library as in version 1.0.0. Leave `thinking` and `output_config` unset:
+
+```python
+from aws_bedrock_invoke import BedrockInvoker, json_text_block
+
+invoker = BedrockInvoker.from_env()
+
+result = invoker.invoke_json(
+    model="us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+    profile_arn_fmt="arn:aws:bedrock:{region}:123456789012:inference-profile/{model}",
+    system_prompt="Reply with strict JSON.",
+    user_content=[
+        json_text_block({"question": "hello"}),
+    ],
+)
+
+print(result.parsed_json)
+```
+
+### Claude Sonnet 5.5
+
+Pass `temperature=None`, raise `max_tokens`, and optionally set `thinking` and
+`output_config`:
+
+```python
+from aws_bedrock_invoke import BedrockInvoker, json_text_block
+
+invoker = BedrockInvoker.from_env()
+
+result = invoker.invoke_json(
+    model="us.anthropic.claude-sonnet-5-5",
+    profile_arn_fmt="arn:aws:bedrock:{region}:123456789012:inference-profile/{model}",
+    system_prompt="Answer the question.",
+    user_content=[
+        json_text_block({"question": "hello"}),
+    ],
+    max_tokens=16000,
+    temperature=None,
+    thinking={"type": "adaptive"},
+    output_config={
+        "effort": "medium",
+        "format": {
+            "type": "json_schema",
+            "schema": {
+                "type": "object",
+                "properties": {"answer": {"type": "string"}},
+                "required": ["answer"],
+                "additionalProperties": False,
+            },
+        },
+    },
+)
+
+print(result.parsed_json)
+```
+
+Both parameters also work with `invoke_text()`.
+
+Notes for Claude Sonnet 5.5:
+
+- Without `temperature=None`, the request fails with a 400 error
+  (`temperature` is unsupported for this model).
+- `thinking` accepts `{"type": "adaptive"}` (the model default) or
+  `{"type": "between_tools"}`, which turns thinking off and requires effort `high`
+  or below. `disabled` and `budget_tokens` return a 400 error.
+- `output_config.effort` defaults to `high`. Lower values answer faster and use
+  fewer tokens.
+- With `output_config.format`, every `object` in the schema must set
+  `"additionalProperties": False`.
+- `invoke_json()` requires a JSON object at the root of the response.
+
+## Stop Reason, Refusals and Truncation
+
+A refusal or a response cut off at `max_tokens` still comes back as a
+successful (HTTP 200) call. Every `InvokeResult` exposes the model's
+`stop_reason` (`"end_turn"`, `"max_tokens"`, `"refusal"`, ...), or `None` when
+the response has none.
+
+`invoke_text()` never raises because of the stop reason. Check it yourself:
+
+```python
+result = invoker.invoke_text(...)
+
+if result.stop_reason == "refusal":
+    ...
+elif result.stop_reason == "max_tokens":
+    ...  # result.response_text is incomplete
+```
+
+`invoke_json()` raises a more specific error only when the JSON cannot be
+parsed:
+
+- `BedrockRefusalError` when `stop_reason` is `"refusal"`
+- `BedrockMaxTokensError` when `stop_reason` is `"max_tokens"`
+- `BedrockResponseParseError` for any other parse failure; its message includes
+  the `stop_reason` when the response has one
+
+Both new errors subclass `BedrockResponseParseError`, so existing
+`except BedrockResponseParseError` blocks still catch them. All three carry the
+`InvokeResult` in `error.result`.
+
+```python
+from aws_bedrock_invoke import BedrockMaxTokensError, BedrockRefusalError
+
+try:
+    result = invoker.invoke_json(...)
+except BedrockRefusalError as error:
+    print("refused:", error.result.response_envelope)
+except BedrockMaxTokensError:
+    ...  # retry with a higher max_tokens
+```
+
+If the JSON parses, no error is raised, even when `stop_reason` is
+`"max_tokens"`.
 
 ## Client Injection
 
@@ -178,6 +313,13 @@ Default retry behavior:
 - `text_block`
 - `resolve_model_id`
 
+Exceptions:
+
+- `BedrockInvokeError`
+- `BedrockResponseParseError`
+- `BedrockRefusalError`
+- `BedrockMaxTokensError`
+
 ## Model Resolution
 
 If `model` is a full ARN, the library uses it directly.
@@ -195,7 +337,8 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 
 ## Examples
 
-Runnable examples live in [examples](/home/disarli/Projects/aws-bedrock-invoke-python/examples):
+Runnable examples live in [examples](examples). They make real, billed calls to
+AWS Bedrock, so they never run as part of the test suite:
 
 ```bash
 PYTHONPATH=src python3 examples/invoke_json_example.py
@@ -204,7 +347,8 @@ PYTHONPATH=src python3 examples/invoke_text_example.py
 
 ## Consumer Integration
 
-This repo includes library-level tests and Bedrock smoke examples.
+This repo includes library-level unit tests, which never call AWS, and runnable
+examples that do.
 
 Consumer repositories should still add their own integration smoke that uses
 their real prompt builders and payload-shaping logic through this library.
